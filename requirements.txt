@@ -1,0 +1,6 @@
+lancedb
+requests
+tqdm
+pandas
+pyarrow
+tqdm
