@@ -10,7 +10,7 @@ import lancedb
 import numpy as np
 
 HC_ROOT = "/home/kosta/Repos/DevOps/Product_MED/Product_MED_AL/app/"    # Passe ggf. an
-MTC_ROOT = "./home/kosta/Repos/DevOps/Product_MED_Tech365/Product_MED_Tech/app/"  # Passe ggf. an
+MTC_ROOT = "/home/kosta/Repos/DevOps/Product_MED_Tech365/Product_MED_Tech/app/"  # Passe ggf. an
 CSV_OUTPUT = "namespace_suggestions.csv"
 
 OBJECT_PATTERN = re.compile(r'^(table|page|codeunit|report|xmlport|query|enum|interface|controladdin|pageextension|tableextension|enumextension|profile|dotnet|entitlement|permissionset|permissionsetextension|reportextension|enumvalue|entitlementset|entitlementsetextension)\s+(\d+)?\s*"?([\w\d_]+)"?', re.IGNORECASE)
@@ -58,7 +58,8 @@ def extract_object_info(filepath: str) -> Optional[Tuple[str, str]]:
     return None
 
 def remove_prefix(name: str, prefix: str) -> str:
-    if name.upper().startswith(prefix):
+    # Korrigiert: Case-insensitive Prefix-Entfernung
+    if name.upper().startswith(prefix.upper()):
         return name[len(prefix):]
     return name
 
@@ -354,6 +355,13 @@ def collect_objects(root: str, prefix: str) -> Dict[str, Dict]:
             continue
         obj_type, obj_name = info
         obj_name_noprefix = remove_prefix(obj_name, prefix)
+        # ACHTUNG: Key muss aus obj_type und obj_name_noprefix bestehen, aber obj_name_noprefix muss wirklich NUR das Prefix entfernen!
+        # Fehlerquelle: remove_prefix ist case-sensitive und prüft nur auf Großbuchstaben!
+        # Besser: Case-insensitive Prefix-Entfernung
+        if obj_name.upper().startswith(prefix.upper()):
+            obj_name_noprefix = obj_name[len(prefix):]
+        else:
+            obj_name_noprefix = obj_name
         key = f"{obj_type.lower()}|{obj_name_noprefix.lower()}"
         result[key] = {
             "object_type": obj_type,
@@ -368,6 +376,7 @@ def build_row(key, hc_objs, mtc_objs):
     mtc = mtc_objs.get(key, {})
 
     object_type = hc.get("object_type") or mtc.get("object_type") or ""
+    # Hier wird jeweils das Original aus HC und MTC verwendet:
     object_name_hc = hc.get("object_name", "")
     object_name_mtc = mtc.get("object_name", "")
     filename = hc.get("filename") or mtc.get("filename") or ""
@@ -406,6 +415,8 @@ def main():
     hc_objs = collect_objects(HC_ROOT, PREFIX_HC)
     mtc_objs = collect_objects(MTC_ROOT, PREFIX_MTC)
 
+    # Matching: gleiche Objekte (gleicher Typ + Name ohne Prefix) sollen im selben Namespace landen
+    # Die Schlüssel sind bereits normalisiert (siehe collect_objects)
     all_keys = list(sorted(set(hc_objs.keys()).union(mtc_objs.keys())))
 
     # Lade bestehende Ergebnisse
@@ -420,6 +431,7 @@ def main():
         hc = hc_objs.get(key, {})
         mtc = mtc_objs.get(key, {})
         obj_type = hc.get("object_type") or mtc.get("object_type") or ""
+        # Wichtig: Für die CSV-Spalte "ObjectName HC" und "ObjectName MTC" muss jeweils das Original aus hc_objs bzw. mtc_objs verwendet werden!
         obj_name_hc = hc.get("object_name", "")
         obj_name_mtc = mtc.get("object_name", "")
         csv_key = (obj_type.strip().lower(), obj_name_hc.strip().lower(), obj_name_mtc.strip().lower())
