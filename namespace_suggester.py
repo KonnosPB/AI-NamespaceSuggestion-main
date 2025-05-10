@@ -1,16 +1,29 @@
 import os
 import re
 import csv
+import requests
 from typing import Dict, List, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
-HC_ROOT = "./HC"    # Passe ggf. an
-MTC_ROOT = "./MTC"  # Passe ggf. an
+import lancedb
+import numpy as np
+
+HC_ROOT = "/home/kosta/Repos/DevOps/Product_MED/Product_MED_AL/app/"    # Passe ggf. an
+MTC_ROOT = "./home/kosta/Repos/DevOps/Product_MED_Tech365/Product_MED_Tech/app/"  # Passe ggf. an
 CSV_OUTPUT = "namespace_suggestions.csv"
 
 OBJECT_PATTERN = re.compile(r'^(table|page|codeunit|report|xmlport|query|enum|interface|controladdin|pageextension|tableextension|enumextension|profile|dotnet|entitlement|permissionset|permissionsetextension|reportextension|enumvalue|entitlementset|entitlementsetextension)\s+(\d+)?\s*"?([\w\d_]+)"?', re.IGNORECASE)
 
 PREFIX_HC = "KVSMED"
 PREFIX_MTC = "KVSMTC"
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_EMBED_URL = "http://localhost:11434/api/embeddings"
+OLLAMA_MODEL = "phi4:latest"
+EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "mxbai-embed-large:latest")
+LANCEDB_PATH = "./lancedb"
+LANCEDB_TABLE = "namespace_vectors"
 
 def find_al_files(root: str) -> List[str]:
     al_files = []
@@ -38,22 +51,111 @@ def remove_prefix(name: str, prefix: str) -> str:
         return name[len(prefix):]
     return name
 
-def suggest_namespace(obj_type: str, obj_name: str, filename: str) -> Tuple[str, str, List[Tuple[str, str]]]:
-    # Platzhalter-Logik für Namespace-Vorschlag und Begründung
-    # Hier ggf. KI/Heuristik einbinden
-    if "invoice" in obj_name.lower():
-        ns = "Invoicing"
-        reason = "Objektname enthält 'invoice', daher Invoicing."
-        alternatives = [("Finance", "Verknüpfung mit Finanzdaten"), ("Sales", "Verbindung zu Verkaufsprozessen")]
-    elif "customer" in obj_name.lower():
-        ns = "CRM"
-        reason = "Objektname enthält 'customer', daher CRM."
-        alternatives = [("Sales", "Kundenbezug im Verkauf"), ("Foundation", "Allgemeiner Kundenstamm")]
-    else:
-        ns = "Common"
-        reason = "Kein spezifisches Schlüsselwort gefunden, daher Common."
-        alternatives = [("OtherCapabilities", "Allgemeine Funktionalität"), ("Utilities", "Hilfsobjekt")]
-    return ns, reason, alternatives
+def get_embedding(text: str) -> List[float]:
+    payload = {
+        "model": EMBED_MODEL,
+        "prompt": text
+    }
+    try:
+        response = requests.post(OLLAMA_EMBED_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        embedding = result.get("embedding")
+        if not embedding or not isinstance(embedding, list):
+            raise ValueError("No embedding returned from Ollama.")
+        return embedding
+    except Exception as e:
+        print(f"Embedding-Fehler: {e}")
+        return [0.0] * 1024
+
+def retrieve_context(object_type: str, object_name: str, top_k: int = 3) -> List[Dict]:
+    # Initialisiere LanceDB
+    db = lancedb.connect(LANCEDB_PATH)
+    table = db.open_table(LANCEDB_TABLE)
+    # Erzeuge Embedding für Suchtext
+    query_text = f"{object_type} {object_name}"
+    query_emb = get_embedding(query_text)
+    # Suche nach ähnlichsten Einträgen
+    try:
+        results = table.search(query_emb).limit(top_k).to_list()
+        return results
+    except Exception as e:
+        print(f"LanceDB Retrieval-Fehler: {e}")
+        return []
+
+NAMESPACE_OVERVIEW = """
+Verfügbare Namespaces (bitte möglichst daraus wählen):
+Microsoft Standard:
+- Warehouse, Utilities, System, Service, Sales, RoleCenters, Purchases, Projects, Profile, Pricing, OtherCapabilities, Manufacturing, Invoicing, Inventory, Integration, HumanResources, Foundation, FixedAssets, Finance, eServices, CRM, CostAccounting, CashFlow, Bank, Assembly, API
+
+KUMAVISION Base (KBA):
+- UDI, Call, LIF, OrderQuote, InventorySummary, Common
+
+Healthcare-spezifisch (HC) und MEDTEC-spezifisch (MTC):
+- EDocuments, ECE, MDR, Common
+"""
+
+def ollama_namespace_prompt(object_type: str, object_name: str, filename: str, context: List[Dict], hc_obj: dict, mtc_obj: dict) -> str:
+    context_str = ""
+    for idx, ctx in enumerate(context, 1):
+        ctx_type = ctx.get("object_type", "")
+        ctx_name = ctx.get("object_name", "")
+        ctx_ns = ctx.get("namespace", "")
+        ctx_dir = ctx.get("directory", "")
+        ctx_content = ctx.get("content", "")[:300].replace("\n", " ")
+        context_str += f"\nKontext {idx}: Typ: {ctx_type}, Name: {ctx_name}, Namespace: {ctx_ns}, Verzeichnis: {ctx_dir}, Auszug: {ctx_content}"
+
+    hc_name = hc_obj.get("object_name", "")
+    mtc_name = mtc_obj.get("object_name", "")
+    hc_info = f"HC-Objektname: {hc_name}" if hc_name else ""
+    mtc_info = f"MTC-Objektname: {mtc_name}" if mtc_name else ""
+    both_info = ", ".join(filter(None, [hc_info, mtc_info]))
+
+    return (
+        f"Du bist ein Experte für Microsoft Dynamics 365 Business Central AL-Entwicklung. "
+        f"Für das folgende Objekt aus den Lösungen HC (Healthcare) und/oder MTC (Medtec) soll ein passender Namespace vorgeschlagen werden. "
+        f"Beachte: Beide Apps stammen aus einem gemeinsamen Ursprung und haben eine Abhängigkeit zu KUMAVISION Base (KBA) und Microsoft Base Application. "
+        f"Die KBA hat noch keine Namespaces, aber das Verzeichnis gibt einen Hinweis auf den zukünftigen Namespace. "
+        f"Die Base Application verwendet bereits Namespaces, die möglichst eingehalten werden sollten. "
+        f"Hier ist eine Übersicht der bislang verfügbaren Namespaces:\n{NAMESPACE_OVERVIEW}\n"
+        f"Objekttyp: {object_type}, Objektname: {object_name}, Dateiname: {filename}. {both_info}\n"
+        f"Berücksichtige folgende ähnliche Objekte aus Base Application und KBA:{context_str}\n"
+        f"Deine Aufgabe:\n"
+        f"- Schlage einen passenden Namespace aus obiger Liste vor.\n"
+        f"- Begründe deine Entscheidung.\n"
+        f"- Schlage wenn möglich alternative Namespaces aus der Liste vor und begründe diese Alternativen.\n"
+        f"Gib das Ergebnis als JSON im folgenden Format zurück:\n"
+        f'{{"namespace": "...", "reason": "...", "alternatives": [{{"namespace": "...", "reason": "..."}}]}}'
+    )
+
+def suggest_namespace_ollama(object_type: str, object_name: str, filename: str, hc_obj: dict, mtc_obj: dict) -> Tuple[str, str, List[Tuple[str, str]]]:
+    context = retrieve_context(object_type, object_name, top_k=3)
+    prompt = ollama_namespace_prompt(object_type, object_name, filename, context, hc_obj, mtc_obj)
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False
+    }
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        response.raise_for_status()
+        result = response.json()
+        import json as pyjson
+        text = result.get("response", "")
+        print(f"\n--- Ollama Antwort für {object_type} {object_name} ---\n{text}\n")  # Debug-Ausgabe
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            data = pyjson.loads(match.group(0))
+            ns = data.get("namespace", "")
+            reason = data.get("reason", "")
+            alternatives = []
+            for alt in data.get("alternatives", []):
+                alternatives.append((alt.get("namespace", ""), alt.get("reason", "")))
+            return ns, reason, alternatives
+        else:
+            return "", "Konnte kein JSON aus Ollama-Antwort extrahieren.", []
+    except Exception as e:
+        return "", f"Ollama-Fehler: {e}", []
 
 def collect_objects(root: str, prefix: str) -> Dict[str, Dict]:
     result = {}
@@ -76,10 +178,13 @@ def main():
     hc_objs = collect_objects(HC_ROOT, PREFIX_HC)
     mtc_objs = collect_objects(MTC_ROOT, PREFIX_MTC)
 
-    all_keys = set(hc_objs.keys()).union(mtc_objs.keys())
+    all_keys = list(sorted(set(hc_objs.keys()).union(mtc_objs.keys())))
     rows = []
 
-    for key in sorted(all_keys):
+    # Begrenze auf die ersten 10 Einträge für einen Testlauf
+    test_keys = all_keys[:10]
+
+    def build_row(key):
         hc = hc_objs.get(key, {})
         mtc = mtc_objs.get(key, {})
 
@@ -88,17 +193,18 @@ def main():
         object_name_mtc = mtc.get("object_name", "")
         filename = hc.get("filename") or mtc.get("filename") or ""
 
-        # Für Namespace-Vorschlag: Nutze bevorzugt HC, sonst MTC
         suggest_base = hc or mtc
-        ns, ns_reason, alternatives = suggest_namespace(
+        ns, ns_reason, alternatives = suggest_namespace_ollama(
             object_type,
             suggest_base.get("object_name_noprefix", ""),
-            filename
+            filename,
+            hc,
+            mtc
         )
         alt_ns = "; ".join([a[0] for a in alternatives])
         alt_reason = "; ".join([a[1] for a in alternatives])
 
-        rows.append({
+        return {
             "ObjectType": object_type,
             "ObjectName HC": object_name_hc,
             "ObjectName MTC": object_name_mtc,
@@ -107,7 +213,15 @@ def main():
             "Alternative Namespace Vorschlag": alt_ns,
             "Alternative Namespace Begründung": alt_reason,
             "Dateiname": filename
-        })
+        }
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futures = {executor.submit(build_row, key): key for key in test_keys}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Namespace-Vorschläge", unit="Objekt"):
+            rows.append(future.result())
+
+    # Sortiere die Zeilen nach ObjectType und Name
+    rows.sort(key=lambda r: (r["ObjectType"], r["ObjectName HC"] or r["ObjectName MTC"]))
 
     with open(CSV_OUTPUT, "w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [

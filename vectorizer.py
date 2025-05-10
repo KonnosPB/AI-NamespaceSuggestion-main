@@ -17,7 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Constants
 LANCEDB_PATH = "./lancedb"  # Lokaler Pfad zur LanceDB-Datenbank
 OLLAMA_URL = "http://localhost:11434/api/embeddings"
-OLLAMA_MODEL = "mxbai-embed-large:latest"
+# Modell kann jetzt per Umgebungsvariable gewählt werden: mxbai-embed-large:latest oder phi4:latest
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mxbai-embed-large:latest")
 FILE_EXTENSION_FILTERS = [".al", ".json"]  # Erlaubte Dateiendungen
 
 # Mehrere Root-Dirs als Liste
@@ -39,6 +40,35 @@ def compute_content_hash(content: str) -> str:
     """
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
+def extract_object_info(content: str, filename: str) -> dict:
+    """
+    Extrahiere Objekt-Id, Objektart, Objekt Name, Namespace aus dem Content oder Dateinamen.
+    Diese Funktion ist ein Platzhalter und sollte je nach Dateiformat angepasst werden.
+    """
+    # Beispiel für AL-Dateien (sehr einfach, ggf. anpassen!)
+    import re
+    object_id = ""
+    object_type = ""
+    object_name = ""
+    namespace = ""
+    # Versuche, Objektinformationen aus dem Inhalt zu extrahieren
+    # Beispiel für AL: "table 50100 MyTableName"
+    match = re.search(r'^(table|page|codeunit|report|enum|interface|query|xmlport|controladdin|profile|permissionset|entitlement|enumextension|tableextension|pageextension|reportextension|permissionsetextension|dotnet|label)\s+(\d+)\s+("[^"]+"|\w+)', content, re.MULTILINE | re.IGNORECASE)
+    if match:
+        object_type = match.group(1)
+        object_id = match.group(2)
+        object_name = match.group(3).strip('"')
+    # Namespace ggf. aus dem Inhalt extrahieren (z.B. "namespace = 'MyNamespace';")
+    ns_match = re.search(r'namespace\s*=\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+    if ns_match:
+        namespace = ns_match.group(1)
+    return {
+        "object_id": object_id,
+        "object_type": object_type,
+        "object_name": object_name,
+        "namespace": namespace
+    }
+
 # Vectorize Data
 def vectorize_data(data: List[Dict[str, str]]) -> None:
     """
@@ -58,12 +88,23 @@ def vectorize_data(data: List[Dict[str, str]]) -> None:
         ("filename", pa.string()),
         ("directory", pa.string()),
         ("content_hash", pa.string()),
+        # Neue Felder:
+        ("object_id", pa.string()),
+        ("object_type", pa.string()),
+        ("object_name", pa.string()),
+        ("namespace", pa.string()),
     ])
     
     try:
         # Try to open existing table
         table = db.open_table("namespace_vectors")
-    except:
+        # Prüfe, ob neue Spalten fehlen und gib ggf. einen Hinweis aus
+        existing_fields = set(table.schema.names)
+        missing_fields = [field for field in ["object_id", "object_type", "object_name", "namespace"] if field not in existing_fields]
+        if missing_fields:
+            print(f"Achtung: Die Tabelle existiert bereits, aber folgende Felder fehlen: {missing_fields}.")
+            print("LanceDB unterstützt kein nachträgliches Hinzufügen von Spalten. Bitte migriere die Tabelle manuell, falls benötigt.")
+    except Exception:
         # Create new table if it doesn't exist
         table = db.create_table("namespace_vectors", schema=table_schema)
 
@@ -87,12 +128,15 @@ def vectorize_data(data: List[Dict[str, str]]) -> None:
             return None  # Already exists, skip
         filename = item.get("filename", "")
         has_other_hash = any(f == filename and h != content_hash for (f, h) in existing_pairs)
+        # Extrahiere Objektinfos
+        obj_info = extract_object_info(item["content"], item["filename"])
         return {
             "item": item,
             "content_hash": content_hash,
             "pair": pair,
             "filename": filename,
             "has_other_hash": has_other_hash,
+            "obj_info": obj_info,
         }
 
     with tqdm(total=len(data), desc="Vektorisieren", unit="Dokument") as pbar:
@@ -133,6 +177,11 @@ def vectorize_data(data: List[Dict[str, str]]) -> None:
                         "filename": res["filename"],
                         "directory": res["item"].get("directory", ""),
                         "content_hash": res["content_hash"],
+                        # Neue Felder:
+                        "object_id": res["obj_info"].get("object_id", ""),
+                        "object_type": res["obj_info"].get("object_type", ""),
+                        "object_name": res["obj_info"].get("object_name", ""),
+                        "namespace": res["obj_info"].get("namespace", ""),
                     })
                     existing_pairs.add(res["pair"])
                     processed += 1
@@ -208,11 +257,17 @@ def collect_files(root_dir: str, extensions: list) -> List[Dict[str, str]]:
                 try:
                     with open(full_path, encoding="utf-8") as f:
                         content = f.read()
+                    obj_info = extract_object_info(content, fname)
                     result.append({
                         "id": os.path.relpath(full_path, root_dir),
                         "content": content,
                         "filename": fname,
-                        "directory": os.path.relpath(dirpath, root_dir)
+                        "directory": os.path.relpath(dirpath, root_dir),
+                        # Neue Felder:
+                        "object_id": obj_info.get("object_id", ""),
+                        "object_type": obj_info.get("object_type", ""),
+                        "object_name": obj_info.get("object_name", ""),
+                        "namespace": obj_info.get("namespace", ""),
                     })
                     
                     if file_count % 50 == 0:  # Show progress every 50 files

@@ -35,7 +35,7 @@ Das Ziel dieses Projekts ist es, für jedes AL-Objekt in den verwandten Lösunge
 
 #### Namespace-Übersicht
 Die verfügbaren Namespaces stammen aus drei Quellen:
-_Anmerkung: Es können auch andere Namesspaces enthalten sein, die auf der List noch nicht enthalten sind.
+_Anmerkung: Es können auch andere Namesspaces enthalten sein, die auf der List noch nicht enthalten sind._
 
 1. **Microsoft Standard**:
    - `Warehouse`
@@ -87,6 +87,6 @@ _Anmerkung: Es können auch andere Namesspaces enthalten sein, die auf der List 
 - Es gibt maximal drei Namespace-Ebenen.
 
 #### Beispielausgabe
-| Objekt-Typ    | Objekt-ID | Objekt-Name | Namespace Vorschlag | Begründung                          | Alternative Namespaces (sortiert) mit Erklärung |
-|---------------|-----------|-------------|----------------------|--------------------------------------|------------------------------------------------|
-| PageExtension | 12345     | KVSMEDFoo   | Invoice             | Weil es etwas mit Rechnungen zu tun hat | - Finance: Verknüpfung mit Finanzdaten         |
+| Objekt-Typ    | Objekt-ID | Objekt-Name | Namespace Vorschlag | Begründung                              | Alternative Namespaces (sortiert) mit Erklärung |
+|---------------|-----------|-------------|---------------------|-----------------------------------------|-------------------------------------------------|
+| PageExtension | 12345     | KVSMEDFoo   | Invoice             | Weil es etwas mit Rechnungen zu tun hat | - Finance: Verknüpfung mit Finanzdaten          |
