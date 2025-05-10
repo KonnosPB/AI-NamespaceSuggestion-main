@@ -12,6 +12,7 @@ from tqdm import tqdm
 import hashlib
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Constants
 LANCEDB_PATH = "./lancedb"  # Lokaler Pfad zur LanceDB-Datenbank
@@ -24,7 +25,7 @@ ROOT_DIRS = [
     r"/home/kosta/Repos/DevOps/Product_KBA/Product_KBA_BC_AL/app/",
     r"/home/kosta/Repos/DevOps/Product_MED/Product_MED_AL/app/",
     r"/home/kosta/Repos/DevOps/Product_MED_Tech365/Product_MED_Tech/app/",
-    r"/home/kosta/Repos/GitHub/StefanMaron/MSDyn365BC.Code.History/"
+    r"/home/kosta/Repos/GitHub/StefanMaron/MSDyn365BC.Code.History/BaseApp/Source/Base Application"
     
 ]
 
@@ -75,42 +76,84 @@ def vectorize_data(data: List[Dict[str, str]]) -> None:
         pass  # Tabelle ist evtl. noch leer
 
     start_time = time.time()
+    batch = []
+    batch_size = 64  # Passe die Batchgröße ggf. an
+    max_workers = 10  # Passe die Thread-Anzahl ggf. an
+
+    def embedding_task(item):
+        content_hash = compute_content_hash(item["content"])
+        pair = (item.get("filename", ""), content_hash)
+        if pair in existing_pairs:
+            return None  # Already exists, skip
+        filename = item.get("filename", "")
+        has_other_hash = any(f == filename and h != content_hash for (f, h) in existing_pairs)
+        return {
+            "item": item,
+            "content_hash": content_hash,
+            "pair": pair,
+            "filename": filename,
+            "has_other_hash": has_other_hash,
+        }
+
     with tqdm(total=len(data), desc="Vektorisieren", unit="Dokument") as pbar:
-        for idx, item in enumerate(data, 1):
-            content_hash = compute_content_hash(item["content"])
-            pair = (item.get("filename", ""), content_hash)
-            if pair in existing_pairs:
+        # Schritt 1: Vorfiltern, was wirklich verarbeitet werden muss
+        filtered = []
+        skipped = 0
+        for item in data:
+            res = embedding_task(item)
+            if res:
+                filtered.append(res)
+            else:
+                skipped += 1
                 pbar.update(1)
-                continue
+        total_to_process = len(filtered)
+        print(f"{skipped} Dateien übersprungen (bereits vorhanden), {total_to_process} zu vektorisieren.")
 
-            # Nur löschen, wenn ein anderer Hash für dieses Filename existiert
-            # (d.h. gleicher Filename, aber anderer content_hash)
-            filename = item.get("filename", "")
-            # Prüfe, ob es einen anderen Hash für dieses Filename gibt
-            has_other_hash = any(f == filename and h != content_hash for (f, h) in existing_pairs)
-            if has_other_hash:
-                del_filter_str = f"filename = '{filename}'"
-                table.delete(where=del_filter_str)
+        # Schritt 2: Embeddings parallel generieren
+        def embedding_worker(res):
+            print(f"Generiere Embedding für: {res['item']['filename']}")  # Logging
+            embedding = generate_embedding(res["item"]["content"])
+            return {**res, "embedding": embedding}
 
-            embedding = generate_embedding(item["content"])
-            table.add([{
-                "id": item["id"],
-                "content": item["content"],
-                "embedding": embedding,
-                "filename": filename,
-                "directory": item.get("directory", ""),
-                "content_hash": content_hash,
-            }])
-
-            existing_pairs.add(pair)
-
-            # Fortschritt nur alle 10 Schritte aktualisieren
-            if idx % 10 == 0 or idx == len(data):
-                elapsed = time.time() - start_time
-                avg_time = elapsed / idx
-                remaining = avg_time * (len(data) - idx)
-                pbar.set_postfix_str(f"Ø {avg_time:.2f}s, Rest {remaining/60:.1f}min")
-            pbar.update(1)
+        results = []
+        processed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(embedding_worker, res) for res in filtered]
+            for idx, future in enumerate(as_completed(futures), 1):
+                try:
+                    res = future.result()
+                    # Delete nur wenn nötig
+                    if res["has_other_hash"]:
+                        del_filter_str = f"filename = '{res['filename']}'"
+                        table.delete(where=del_filter_str)
+                    batch.append({
+                        "id": res["item"]["id"],
+                        "content": res["item"]["content"],
+                        "embedding": res["embedding"],
+                        "filename": res["filename"],
+                        "directory": res["item"].get("directory", ""),
+                        "content_hash": res["content_hash"],
+                    })
+                    existing_pairs.add(res["pair"])
+                    processed += 1
+                    # Batch-Insert
+                    if len(batch) >= batch_size:
+                        table.add(batch)
+                        batch.clear()
+                except Exception as e:
+                    print(f"Fehler bei Verarbeitung: {e}")
+                # Fortschritt nur alle 10 Schritte aktualisieren
+                if idx % 10 == 0 or idx == total_to_process:
+                    elapsed = time.time() - start_time
+                    avg_time = elapsed / idx
+                    remaining = avg_time * (total_to_process - idx)
+                    pbar.set_postfix_str(f"Ø {avg_time:.2f}s, Rest {remaining/60:.1f}min")
+                pbar.update(1)
+        # Restliche Einträge einfügen
+        if batch:
+            table.add(batch)
+            batch.clear()
+        print(f"{processed} Dateien vektorisiert und gespeichert.")
 
 def generate_embedding(content: str) -> List[float]:
     """
