@@ -95,7 +95,7 @@ Healthcare-spezifisch (HC) und MEDTEC-spezifisch (MTC):
 - EDocuments, ECE, MDR, Common
 """
 
-def ollama_namespace_prompt(object_type: str, object_name: str, filename: str, context: List[Dict], hc_obj: dict, mtc_obj: dict) -> str:
+def ollama_namespace_prompt(object_type: str, object_name: str, filename: str, context: List[Dict], hc_obj: dict, mtc_obj: dict, extension_context: List[Dict] = None, extension_base: str = None) -> str:
     context_str = ""
     for idx, ctx in enumerate(context, 1):
         ctx_type = ctx.get("object_type", "")
@@ -111,33 +111,137 @@ def ollama_namespace_prompt(object_type: str, object_name: str, filename: str, c
     mtc_info = f"MTC-Objektname: {mtc_name}" if mtc_name else ""
     both_info = ", ".join(filter(None, [hc_info, mtc_info]))
 
-    return (
-        f"Du bist ein Experte für Microsoft Dynamics 365 Business Central AL-Entwicklung. "
-        f"Für das folgende Objekt aus den Lösungen HC (Healthcare) und/oder MTC (Medtec) soll ein passender Namespace vorgeschlagen werden. "
-        f"Beachte: Beide Apps stammen aus einem gemeinsamen Ursprung und haben eine Abhängigkeit zu KUMAVISION Base (KBA) und Microsoft Base Application. "
-        f"Die KBA hat noch keine Namespaces, aber das Verzeichnis gibt einen Hinweis auf den zukünftigen Namespace. "
-        f"Die Base Application verwendet bereits Namespaces, die möglichst eingehalten werden sollten. "
-        f"Hier ist eine Übersicht der bislang verfügbaren Namespaces:\n{NAMESPACE_OVERVIEW}\n"
-        f"Objekttyp: {object_type}, Objektname: {object_name}, Dateiname: {filename}. {both_info}\n"
-        f"Berücksichtige folgende ähnliche Objekte aus Base Application und KBA:{context_str}\n"
-        f"Deine Aufgabe:\n"
-        f"- Schlage einen passenden Namespace aus obiger Liste vor.\n"
-        f"- Begründe deine Entscheidung.\n"
-        f"- Schlage wenn möglich alternative Namespaces aus der Liste vor und begründe diese Alternativen.\n"
-        f"Gib das Ergebnis als JSON im folgenden Format zurück:\n"
-        f'{{"namespace": "...", "reason": "...", "alternatives": [{{"namespace": "...", "reason": "..."}}]}}'
+    namespace_rules = (
+        "WICHTIG: "
+        "Du darfst ausschließlich Namespaces aus der untenstehenden Liste verwenden. "
+        "Erfinde keine neuen Namespaces und verwende keine Präfixe wie 'MyCompany' oder Ähnliches. "
+        "Wenn ein Objekt mehreren Bereichen zugeordnet werden kann oder übergreifend ist, "
+        "dann wähle den Namespace 'Common' (Root-Ebene)."
     )
 
+    # Prompt für Extension-Objekte
+    if extension_context and extension_base:
+        ext_ctx = extension_context[0] if extension_context else {}
+        ext_ns = ext_ctx.get("namespace", "")
+        ext_type = ext_ctx.get("object_type", "")
+        ext_name = ext_ctx.get("object_name", "")
+        ext_dir = ext_ctx.get("directory", "")
+        ext_info = f"Das Objekt erweitert {ext_type} '{ext_name}' (Namespace: {ext_ns}, Verzeichnis: {ext_dir})."
+        return (
+            f"Du bist ein Experte für Microsoft Dynamics 365 Business Central AL-Entwicklung. "
+            f"Für das folgende Extension-Objekt soll ein passender Namespace vorgeschlagen werden. "
+            f"{ext_info}\n"
+            f"Der Namespace der Extension sollte sich am Namespace des erweiterten Objekts orientieren. "
+            f"{namespace_rules}\n"
+            f"Hier ist eine Übersicht der bislang verfügbaren Namespaces:\n{NAMESPACE_OVERVIEW}\n"
+            f"Objekttyp: {object_type}, Objektname: {object_name}, Dateiname: {filename}. {both_info}\n"
+            f"Berücksichtige folgende ähnliche Objekte aus Base Application und KBA:{context_str}\n"
+            f"Deine Aufgabe:\n"
+            f"- Schlage einen passenden Namespace aus obiger Liste vor (bevorzugt den Namespace des erweiterten Objekts).\n"
+            f"- Begründe deine Entscheidung.\n"
+            f"- Schlage wenn möglich alternative Namespaces aus der Liste vor und begründe diese Alternativen.\n"
+            f"Gib das Ergebnis als JSON im folgenden Format zurück:\n"
+            f'{{"namespace": "...", "reason": "...", "alternatives": [{{"namespace": "...", "reason": "..."}}]}}'
+        )
+    # Prompt für andere Objekte
+    else:
+        return (
+            f"Du bist ein Experte für Microsoft Dynamics 365 Business Central AL-Entwicklung. "
+            f"Für das folgende Objekt aus den Lösungen HC (Healthcare) und/oder MTC (Medtec) soll ein passender Namespace vorgeschlagen werden. "
+            f"Beachte: Beide Apps stammen aus einem gemeinsamen Ursprung und haben eine Abhängigkeit zu KUMAVISION Base (KBA) und Microsoft Base Application. "
+            f"Die KBA hat noch keine Namespaces, aber das Verzeichnis gibt einen Hinweis auf den zukünftigen Namespace. "
+            f"Die Base Application verwendet bereits Namespaces, die möglichst eingehalten werden sollten. "
+            f"{namespace_rules}\n"
+            f"Hier ist eine Übersicht der bislang verfügbaren Namespaces:\n{NAMESPACE_OVERVIEW}\n"
+            f"Objekttyp: {object_type}, Objektname: {object_name}, Dateiname: {filename}. {both_info}\n"
+            f"Berücksichtige folgende ähnliche Objekte aus Base Application und KBA:{context_str}\n"
+            f"Deine Aufgabe:\n"
+            f"- Analysiere den Kernaspekt des Objekts (z.B. Zweck, verwendete Objekte, Schlüsselwörter).\n"
+            f"- Prüfe, ob ein existierender Namespace aus der Liste passt oder ob bekannte Namespaces im Objekt verwendet werden.\n"
+            f"- Schlage einen passenden Namespace aus obiger Liste vor.\n"
+            f"- Begründe deine Entscheidung.\n"
+            f"- Schlage wenn möglich alternative Namespaces aus der Liste vor und begründe diese Alternativen.\n"
+            f"Gib das Ergebnis als JSON im folgenden Format zurück:\n"
+            f'{{"namespace": "...", "reason": "...", "alternatives": [{{"namespace": "...", "reason": "..."}}]}}'
+        )
+
+def extract_extended_object(content: str) -> Optional[Tuple[str, str]]:
+    """
+    Extrahiert das erweiterte Objekt bei Extension-Objekten (z.B. tableextension 50100 "MyTableExt" extends "BaseTable")
+    Gibt (Typ, Name) zurück oder None.
+    """
+    import re
+    match = re.search(r'^(tableextension|pageextension|enumextension|reportextension|permissionsetextension)\s+\d+\s+"?([\w\d_]+)"?\s+extends\s+"?([\w\d_]+)"?', content, re.IGNORECASE | re.MULTILINE)
+    if match:
+        ext_type = match.group(1)
+        base_name = match.group(3)
+        return ext_type, base_name
+    return None
+
+def retrieve_context_for_extension(base_object_name: str, base_object_type: str = None, top_k: int = 1) -> List[Dict]:
+    # Suche gezielt nach dem Basisobjekt in LanceDB
+    db = lancedb.connect(LANCEDB_PATH)
+    table = db.open_table(LANCEDB_TABLE)
+    filter_expr = f"object_name = '{base_object_name}'"
+    if base_object_type:
+        filter_expr += f" and object_type = '{base_object_type}'"
+    try:
+        results = table.search(filter=None, where=filter_expr).limit(top_k).to_list()
+        return results
+    except Exception as e:
+        print(f"LanceDB Extension-Retrieval-Fehler: {e}")
+        return []
+
 def suggest_namespace_ollama(object_type: str, object_name: str, filename: str, hc_obj: dict, mtc_obj: dict) -> Tuple[str, str, List[Tuple[str, str]]]:
+    # Hole den Dateipfad für den Content
+    filepath = None
+    if hc_obj.get("filename"):
+        filepath = os.path.join(HC_ROOT, hc_obj["filename"])
+    elif mtc_obj.get("filename"):
+        filepath = os.path.join(MTC_ROOT, mtc_obj["filename"])
+    content = ""
+    if filepath and os.path.exists(filepath):
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            pass
+
+    # Prüfe auf Extension-Objekt
+    ext_info = extract_extended_object(content) if content else None
+    extension_context = []
+    extension_base = None
+    if ext_info:
+        ext_type, base_name = ext_info
+        extension_base = base_name
+        # Suche gezielt nach dem Basisobjekt in LanceDB
+        extension_context = retrieve_context_for_extension(base_name)
+        # Fallback: Wenn nichts gefunden, Standard-Kontext
+        if not extension_context:
+            extension_context = retrieve_context(object_type, object_name, top_k=3)
+    else:
+        extension_context = None
+
+    # Standard-Kontext für alle Objekte
     context = retrieve_context(object_type, object_name, top_k=3)
-    prompt = ollama_namespace_prompt(object_type, object_name, filename, context, hc_obj, mtc_obj)
+
+    prompt = ollama_namespace_prompt(
+        object_type,
+        object_name,
+        filename,
+        context,
+        hc_obj,
+        mtc_obj,
+        extension_context=extension_context if ext_info else None,
+        extension_base=extension_base
+    )
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False
     }
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        response = requests.post(OLLAMA_URL, json=payload, timeout=300)  # Timeout erhöht auf 300 Sekunden
         response.raise_for_status()
         result = response.json()
         import json as pyjson
