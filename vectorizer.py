@@ -45,14 +45,12 @@ def extract_object_info(content: str, filename: str) -> dict:
     Extrahiere Objekt-Id, Objektart, Objekt Name, Namespace aus dem Content oder Dateinamen.
     Diese Funktion ist ein Platzhalter und sollte je nach Dateiformat angepasst werden.
     """
-    # Beispiel für AL-Dateien (sehr einfach, ggf. anpassen!)
     import re
     object_id = ""
     object_type = ""
     object_name = ""
     namespace = ""
     # Versuche, Objektinformationen aus dem Inhalt zu extrahieren
-    # Beispiel für AL: "table 50100 MyTableName"
     match = re.search(r'^(table|page|codeunit|report|enum|interface|query|xmlport|controladdin|profile|permissionset|entitlement|enumextension|tableextension|pageextension|reportextension|permissionsetextension|dotnet|label)\s+(\d+)\s+("[^"]+"|\w+)', content, re.MULTILINE | re.IGNORECASE)
     if match:
         object_type = match.group(1)
@@ -62,6 +60,13 @@ def extract_object_info(content: str, filename: str) -> dict:
     ns_match = re.search(r'namespace\s*=\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
     if ns_match:
         namespace = ns_match.group(1)
+    # Spezialfall: KVSKBA-Objekte -> Namespace aus Verzeichnisname
+    if object_name.startswith("KVSKBA"):
+        # Versuche, das übergeordnete Verzeichnis aus dem filename zu extrahieren
+        # filename ist nur der Dateiname, daher muss der Aufrufer das Verzeichnis mitgeben
+        # Wir erwarten, dass extract_object_info im Kontext von collect_files aufgerufen wird,
+        # daher kann dort das Verzeichnis übergeben werden.
+        pass  # Wird unten in collect_files behandelt
     return {
         "object_id": object_id,
         "object_type": object_type,
@@ -102,8 +107,10 @@ def vectorize_data(data: List[Dict[str, str]]) -> None:
         existing_fields = set(table.schema.names)
         missing_fields = [field for field in ["object_id", "object_type", "object_name", "namespace"] if field not in existing_fields]
         if missing_fields:
-            print(f"Achtung: Die Tabelle existiert bereits, aber folgende Felder fehlen: {missing_fields}.")
-            print("LanceDB unterstützt kein nachträgliches Hinzufügen von Spalten. Bitte migriere die Tabelle manuell, falls benötigt.")
+            print(f"FEHLER: Die Tabelle existiert bereits, aber folgende Felder fehlen: {missing_fields}.")
+            print("Bitte lösche die Tabelle 'namespace_vectors' in LanceDB und lasse das Skript erneut laufen, damit das Schema korrekt angelegt wird.")
+            print("Alternativ: Migriere die Tabelle manuell mit den neuen Feldern.")
+            return  # Abbruch, um weitere Fehler zu vermeiden
     except Exception:
         # Create new table if it doesn't exist
         table = db.create_table("namespace_vectors", schema=table_schema)
@@ -219,7 +226,7 @@ def generate_embedding(content: str) -> List[float]:
         "prompt": content
     }
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=30)
+        response = requests.post(OLLAMA_URL, json=payload, timeout=300)  # Timeout erhöht
         response.raise_for_status()
         result = response.json()
         # Ollama gibt das Embedding unter "embedding" zurück
@@ -242,12 +249,11 @@ def collect_files(root_dir: str, extensions: list) -> List[Dict[str, str]]:
     
     print(f"Sammle Dateien mit Endungen {', '.join(extensions)}...")
     
-    # Get total directory count for better progress indication
     total_dirs = sum([len(dirpath) for dirpath, _, _ in os.walk(root_dir)])
     
     for dirpath, _, filenames in os.walk(root_dir):
         dir_count += 1
-        if dir_count % 10 == 0:  # Show progress every 10 directories
+        if dir_count % 10 == 0:
             print(f"Verarbeite Verzeichnis {dir_count}/{total_dirs}: {os.path.relpath(dirpath, root_dir)}")
         
         for fname in filenames:
@@ -258,19 +264,27 @@ def collect_files(root_dir: str, extensions: list) -> List[Dict[str, str]]:
                     with open(full_path, encoding="utf-8") as f:
                         content = f.read()
                     obj_info = extract_object_info(content, fname)
+                    # Spezialfall: KVSKBA-Objekte -> Namespace aus übergeordnetem Verzeichnis
+                    if obj_info.get("object_name", "").startswith("KVSKBA"):
+                        # Hole das übergeordnete Verzeichnis (direkt über dem Dateinamen)
+                        rel_dir = os.path.relpath(dirpath, root_dir)
+                        # Namespace ist der letzte Teil des relativen Verzeichnispfads
+                        ns_candidate = os.path.basename(rel_dir)
+                        # Setze Namespace, falls nicht schon im Content gefunden
+                        if not obj_info.get("namespace"):
+                            obj_info["namespace"] = ns_candidate
                     result.append({
                         "id": os.path.relpath(full_path, root_dir),
                         "content": content,
                         "filename": fname,
                         "directory": os.path.relpath(dirpath, root_dir),
-                        # Neue Felder:
                         "object_id": obj_info.get("object_id", ""),
                         "object_type": obj_info.get("object_type", ""),
                         "object_name": obj_info.get("object_name", ""),
                         "namespace": obj_info.get("namespace", ""),
                     })
                     
-                    if file_count % 50 == 0:  # Show progress every 50 files
+                    if file_count % 50 == 0:
                         print(f"Dateien gefunden: {file_count} (aktuell: {fname})")
                         
                 except Exception as e:
@@ -293,3 +307,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Beispiel-Skript zum Löschen der Tabelle 'namespace_vectors' in LanceDB
+
+# import lancedb
+
+# LANCEDB_PATH = "./lancedb"
+
+# def drop_namespace_vectors():
+#     db = lancedb.connect(LANCEDB_PATH)
+#     db.drop_table("namespace_vectors")
+#     print("Tabelle 'namespace_vectors' wurde gelöscht.")
+
+# if __name__ == "__main__":
+#     drop_namespace_vectors()

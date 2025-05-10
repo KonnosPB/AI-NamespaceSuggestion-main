@@ -74,9 +74,9 @@ _Anmerkung: Es können auch andere Namesspaces enthalten sein, die auf der List 
    - `Common`  (Der temporäre Namespace dient als Ersatz für den Root Namespace Kumavision.Base. Die entsprechenden Dateien befinden sich im Verzeichnis Common.)
 
 3. **Healthcare-spezifisch (HC) und MEDTEC-spezifisch (MTC)**:
-   - `EDocuments`
-   - `ECE`
-   - `MDR`
+   - `EDocuments` (Alles rund um elektronische&digitale Dokumentenhandling, das nicht)   
+   - `ECE` (Electron Cost Estimation)
+   - `MDR` (Medical Device Regulation)
    - `Common`  (Der temporäre Namespace dient als Ersatz für den Root Namespace Kumavision.Healthcare bzw. Kumavision.Mtc. Die entsprechenden Dateien befinden sich im Verzeichnis Common.)
 
 #### Besonderheiten
